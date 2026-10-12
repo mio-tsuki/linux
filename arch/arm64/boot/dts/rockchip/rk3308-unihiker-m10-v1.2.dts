@@ -22,6 +22,14 @@
 		stdout-path = "serial0:1500000n8";
 	};
 
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&pwm1 0 10000 0>;
+		brightness-levels = <0 16 32 48 64 80 96 112 128
+				     144 160 176 192 208 224 240 255>;
+		default-brightness-level = <12>;
+	};
+
 	keys {
 		compatible = "gpio-keys";
 
@@ -184,6 +192,13 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&rtc_32k>;
 
+	lcd {
+		lcd_control: lcd-control {
+			rockchip,pins = <1 RK_PB4 RK_FUNC_GPIO &pcfg_pull_none>,
+				       <1 RK_PB6 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
 	sdmmc {
 		sd_vcc_en: sd-vcc-en {
 			rockchip,pins = <4 RK_PD6 RK_FUNC_GPIO &pcfg_pull_none>;
@@ -210,6 +225,10 @@
 &pwm0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pwm0_pin_pull_down>;
+	status = "okay";
+};
+
+&pwm1 {
 	status = "okay";
 };
 
@@ -244,6 +263,40 @@
 	vmmc-supply = <&vcc_sd>;
 	vqmmc-supply = <&vcc_io>;
 	status = "okay";
+};
+
+&spi2 {
+	assigned-clocks = <&cru SCLK_SPI2>;
+	assigned-clock-parents = <&cru PLL_DPLL>;
+	assigned-clock-rates = <100000000>;
+	status = "okay";
+
+	display@0 {
+		compatible = "dfrobot,unihiker-m10-display", "panel-mipi-dbi-spi";
+		reg = <0>;
+		spi-max-frequency = <50000000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&lcd_control>;
+		dc-gpios = <&gpio1 RK_PB6 GPIO_ACTIVE_HIGH>;
+		/* The DBI reset helper drives logical low, then high. */
+		reset-gpios = <&gpio1 RK_PB4 GPIO_ACTIVE_HIGH>;
+		backlight = <&backlight>;
+		format = "r5g6b5";
+		width-mm = <43>;
+		height-mm = <58>;
+
+		panel-timing {
+			clock-frequency = <0>;
+			hactive = <240>;
+			vactive = <320>;
+			hback-porch = <0>;
+			hfront-porch = <0>;
+			hsync-len = <0>;
+			vback-porch = <0>;
+			vfront-porch = <0>;
+			vsync-len = <0>;
+		};
+	};
 };
 
 &u2phy {
