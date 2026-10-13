@@ -19794,6 +19794,7 @@ M:	Mizuno Miotsuki <founder@crepuse.com>
 L:	linux-input@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/input/touchscreen/nsiway,ns2009.yaml
+F:	drivers/input/touchscreen/ns2009.c
 
 NTB AMD DRIVER
 M:	Basavaraj Natikar <Basavaraj.Natikar@amd.com>

@@ -691,6 +691,16 @@ config TOUCHSCREEN_MTOUCH
 	  To compile this driver as a module, choose M here: the
 	  module will be called mtouch.
 
+config TOUCHSCREEN_NS2009
+	tristate "Nsiway NS2009 touchscreen controller"
+	depends on I2C
+	help
+	  Say Y here if you have a resistive touchscreen using the Nsiway
+	  NS2009 controller connected over I2C.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ns2009.
+
 config TOUCHSCREEN_NOVATEK_NVT_TS
 	tristate "Novatek NT11205 touchscreen support"
 	depends on I2C
