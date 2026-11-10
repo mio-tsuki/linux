@@ -2048,6 +2048,19 @@ static int ata_scsi_translate(struct ata_device *dev, struct scsi_cmnd *cmd,
 	if (xlat_func(qc))
 		goto done;
 
+	/*
+	 * A data-out request may contain pages pinned without write access.
+	 * Reject a translated data-in command before issuing it, since its
+	 * completion handler may write to the buffer even if the device fails.
+	 */
+	if (unlikely(cmd->sc_data_direction == DMA_TO_DEVICE &&
+		     ata_is_data(qc->tf.protocol) &&
+		     !(qc->tf.flags & ATA_TFLAG_WRITE))) {
+		ata_scsi_set_sense(dev, cmd, ABORTED_COMMAND,
+				   DATA_IN_BUFFER_ERROR);
+		goto done;
+	}
+
 	return ata_scsi_qc_issue(ap, qc);
 
 done:
@@ -2078,6 +2091,13 @@ static void ata_scsi_rbuf_fill(struct ata_device *dev, struct scsi_cmnd *cmd,
 {
 	unsigned long flags;
 	unsigned int len;
+
+	/* A data-out request may contain pages pinned without write access. */
+	if (cmd->sc_data_direction == DMA_TO_DEVICE) {
+		ata_scsi_set_sense(dev, cmd, ABORTED_COMMAND,
+				   DATA_IN_BUFFER_ERROR);
+		return;
+	}
 
 	spin_lock_irqsave(&ata_scsi_rbuf_lock, flags);
 
@@ -3173,6 +3193,14 @@ static unsigned int atapi_xlat(struct ata_queued_cmd *qc)
 
 	qc->complete_fn = atapi_qc_complete;
 
+	/* atapi_fixup_inquiry() writes to the buffer on successful completion. */
+	if (scmd->sc_data_direction == DMA_TO_DEVICE &&
+	    scmd->cmnd[0] == INQUIRY) {
+		ata_scsi_set_sense(dev, scmd, ABORTED_COMMAND,
+				   DATA_IN_BUFFER_ERROR);
+		return 1;
+	}
+
 	qc->tf.flags |= ATA_TFLAG_ISADDR | ATA_TFLAG_DEVICE;
 	if (scmd->sc_data_direction == DMA_TO_DEVICE) {
 		qc->tf.flags |= ATA_TFLAG_WRITE;
@@ -3581,6 +3609,12 @@ static unsigned int ata_scsi_pass_thru(struct ata_queued_cmd *qc)
 
 	if (is_multi_taskfile(tf)) {
 		unsigned int multi_count = 1 << (cdb[1] >> 5);
+
+		if (!dev->multi_count) {
+			ata_scsi_set_sense(dev, scmd, ABORTED_COMMAND,
+					   NO_ADDITIONAL_SENSE_INFORMATION);
+			return 1;
+		}
 
 		/* compare the passed through multi_count
 		 * with the cached multi_count of libata
@@ -4360,14 +4394,22 @@ invalid_param_len:
 /**
  *	ata_mselect_caching - Simulate MODE SELECT for caching info page
  *	@qc: Storage for translated ATA taskfile
- *	@buf: input buffer
- *	@len: number of valid bytes in the input buffer
- *	@fp: out parameter for the failed field on error
+ *	@buf: Mode page, starting with the mode page header
+ *	@len: Length of the mode page, including the mode page header
+ *	@fp: Out parameter, offset in @buf of the first invalid byte on error
  *
  *	Prepare a taskfile to modify caching information for the device.
  *
+ *	The caller has stripped the mode parameter header and the block
+ *	descriptors, so @buf points at the mode page header, like the buffer
+ *	filled by the ata_msense_*() functions, and offsets in @buf, including
+ *	the one returned in @fp, are the byte numbers of the mode page.
+ *
  *	LOCKING:
  *	None.
+ *
+ *	RETURNS:
+ *	0 if a taskfile was prepared, -EINVAL if the mode page is invalid.
  */
 static int ata_mselect_caching(struct ata_queued_cmd *qc,
 			       const u8 *buf, int len, u16 *fp)
@@ -4378,26 +4420,19 @@ static int ata_mselect_caching(struct ata_queued_cmd *qc,
 	u8 wce;
 	int i;
 
-	/*
-	 * The first two bytes of def_cache_mpage are a header, so offsets
-	 * in mpage are off by 2 compared to buf.  Same for len.
-	 */
-
-	if (len != CACHE_MPAGE_LEN - 2) {
-		*fp = min(len, CACHE_MPAGE_LEN - 2);
+	if (len != CACHE_MPAGE_LEN) {
+		*fp = 1;
 		return -EINVAL;
 	}
 
-	wce = buf[0] & (1 << 2);
+	wce = buf[2] & (1 << 2);
 
 	/*
 	 * Check that read-only bits are not modified.
 	 */
 	ata_msense_caching(dev->id, mpage, false);
-	for (i = 0; i < CACHE_MPAGE_LEN - 2; i++) {
-		if (i == 0)
-			continue;
-		if (mpage[i + 2] != buf[i]) {
+	for (i = 3; i < CACHE_MPAGE_LEN; i++) {
+		if (mpage[i] != buf[i]) {
 			*fp = i;
 			return -EINVAL;
 		}
@@ -4411,8 +4446,26 @@ static int ata_mselect_caching(struct ata_queued_cmd *qc,
 	return 0;
 }
 
-/*
- * Simulate MODE SELECT control mode page, sub-page 0.
+/**
+ *	ata_mselect_control_spg0 - Simulate MODE SELECT for control sub-page 0
+ *	@qc: Storage for translated ATA taskfile
+ *	@buf: Mode page, starting with the mode page header
+ *	@len: Length of the mode page, including the mode page header
+ *	@fp: Out parameter, offset in @buf of the first invalid byte on error
+ *
+ *	Simulate MODE SELECT control mode page, sub-page 0.
+ *
+ *	The caller has stripped the mode parameter header and the block
+ *	descriptors, so @buf points at the mode page header, like the buffer
+ *	filled by the ata_msense_*() functions, and offsets in @buf, including
+ *	the one returned in @fp, are the byte numbers of the mode page.
+ *
+ *	LOCKING:
+ *	None.
+ *
+ *	RETURNS:
+ *	0, as no ATA command needs to be sent, or -EINVAL if the mode page is
+ *	invalid.
  */
 static int ata_mselect_control_spg0(struct ata_queued_cmd *qc,
 				    const u8 *buf, int len, u16 *fp)
@@ -4422,26 +4475,19 @@ static int ata_mselect_control_spg0(struct ata_queued_cmd *qc,
 	u8 d_sense;
 	int i;
 
-	/*
-	 * The first two bytes of def_control_mpage are a header, so offsets
-	 * in mpage are off by 2 compared to buf.  Same for len.
-	 */
-
-	if (len != CONTROL_MPAGE_LEN - 2) {
-		*fp = min(len, CONTROL_MPAGE_LEN - 2);
+	if (len != CONTROL_MPAGE_LEN) {
+		*fp = 1;
 		return -EINVAL;
 	}
 
-	d_sense = buf[0] & (1 << 2);
+	d_sense = buf[2] & (1 << 2);
 
 	/*
 	 * Check that read-only bits are not modified.
 	 */
 	ata_msense_control_spg0(dev, mpage, false);
-	for (i = 0; i < CONTROL_MPAGE_LEN - 2; i++) {
-		if (i == 0)
-			continue;
-		if (mpage[2 + i] != buf[i]) {
+	for (i = 3; i < CONTROL_MPAGE_LEN; i++) {
+		if (mpage[i] != buf[i]) {
 			*fp = i;
 			return -EINVAL;
 		}
@@ -4453,9 +4499,27 @@ static int ata_mselect_control_spg0(struct ata_queued_cmd *qc,
 	return 0;
 }
 
-/*
- * Translate MODE SELECT control mode page, sub-page f2h (ATA feature mode
- * page) into a SET FEATURES command.
+/**
+ *	ata_mselect_control_ata_feature - Translate ATA Feature Control page
+ *	@qc: Storage for translated ATA taskfile
+ *	@buf: Mode page, starting with the mode page header
+ *	@len: Length of the mode page, including the mode page header
+ *	@fp: Out parameter, offset in @buf of the first invalid byte on error
+ *
+ *	Translate MODE SELECT control mode page, sub-page f2h (ATA feature mode
+ *	page) into a SET FEATURES command.
+ *
+ *	The caller has stripped the mode parameter header and the block
+ *	descriptors, so @buf points at the mode page header, like the buffer
+ *	filled by the ata_msense_*() functions, and offsets in @buf, including
+ *	the one returned in @fp, are the byte numbers of the mode page.
+ *
+ *	LOCKING:
+ *	None.
+ *
+ *	RETURNS:
+ *	1 if a taskfile was prepared, -EINVAL if the mode page is invalid or if
+ *	CDL cannot be enabled.
  */
 static int ata_mselect_control_ata_feature(struct ata_queued_cmd *qc,
 					   const u8 *buf, int len, u16 *fp)
@@ -4464,17 +4528,13 @@ static int ata_mselect_control_ata_feature(struct ata_queued_cmd *qc,
 	struct ata_taskfile *tf = &qc->tf;
 	u8 cdl_action;
 
-	/*
-	 * The first four bytes of ATA Feature Control mode page are a header,
-	 * so offsets in mpage are off by 4 compared to buf.  Same for len.
-	 */
-	if (len != ATA_FEATURE_SUB_MPAGE_LEN - 4) {
-		*fp = min(len, ATA_FEATURE_SUB_MPAGE_LEN - 4);
+	if (len != ATA_FEATURE_SUB_MPAGE_LEN) {
+		*fp = 2;
 		return -EINVAL;
 	}
 
 	/* Check cdl_ctrl */
-	switch (buf[0] & 0x03) {
+	switch (buf[4] & 0x03) {
 	case 0:
 		/* Disable CDL */
 		ata_dev_dbg(dev, "Disabling CDL\n");
@@ -4489,6 +4549,7 @@ static int ata_mselect_control_ata_feature(struct ata_queued_cmd *qc,
 		if (dev->flags & ATA_DFLAG_NCQ_PRIO_ENABLED) {
 			ata_dev_err(dev,
 				"NCQ priority must be disabled to enable CDL\n");
+			*fp = 4;
 			return -EINVAL;
 		}
 		ata_dev_dbg(dev, "Enabling CDL\n");
@@ -4496,7 +4557,7 @@ static int ata_mselect_control_ata_feature(struct ata_queued_cmd *qc,
 		dev->flags |= ATA_DFLAG_CDL_ENABLED;
 		break;
 	default:
-		*fp = 0;
+		*fp = 4;
 		return -EINVAL;
 	}
 
@@ -4512,15 +4573,24 @@ static int ata_mselect_control_ata_feature(struct ata_queued_cmd *qc,
 /**
  *	ata_mselect_control - Simulate MODE SELECT for control page
  *	@qc: Storage for translated ATA taskfile
- *	@spg: target sub-page of the control page
- *	@buf: input buffer
- *	@len: number of valid bytes in the input buffer
- *	@fp: out parameter for the failed field on error
+ *	@spg: Sub-page of the control page, 0 or ATA_FEATURE_SUB_MPAGE
+ *	@buf: Mode page, starting with the mode page header
+ *	@len: Length of the mode page, including the mode page header
+ *	@fp: Out parameter, offset in @buf of the first invalid byte on error
  *
- *	Prepare a taskfile to modify caching information for the device.
+ *	Call the handler of sub-page @spg of the control mode page.
+ *
+ *	The caller has stripped the mode parameter header and the block
+ *	descriptors, so @buf points at the mode page header, like the buffer
+ *	filled by the ata_msense_*() functions, and offsets in @buf, including
+ *	the one returned in @fp, are the byte numbers of the mode page.
  *
  *	LOCKING:
  *	None.
+ *
+ *	RETURNS:
+ *	0 if no ATA command needs to be sent, 1 if a taskfile was prepared,
+ *	-EINVAL if the mode page is invalid.
  */
 static int ata_mselect_control(struct ata_queued_cmd *qc, u8 spg,
 			       const u8 *buf, int len, u16 *fp)
@@ -4607,7 +4677,6 @@ static unsigned int ata_scsi_mode_select_xlat(struct ata_queued_cmd *qc)
 		goto invalid_param_len;
 	if (bd_len != 0 && bd_len != 8) {
 		fp = (six_byte) ? 3 : 6;
-		fp += bd_len + hdr_len;
 		goto invalid_param;
 	}
 
@@ -4622,47 +4691,55 @@ static unsigned int ata_scsi_mode_select_xlat(struct ata_queued_cmd *qc)
 		if (len < 4)
 			goto invalid_param_len;
 
+		/*
+		 * Mode pages with subpage code 00h use the page_0 format: SAT
+		 * defines the SPF bit of the Caching and Control mode pages,
+		 * for subpage code 00h, as not changeable and set to zero.
+		 */
 		spg = p[1];
-		pg_len = get_unaligned_be16(&p[2]);
-		p += 4;
-		len -= 4;
+		if (!spg) {
+			fp = hdr_len + bd_len;
+			goto invalid_param;
+		}
+
+		pg_len = get_unaligned_be16(&p[2]) + 4;
 	} else {
 		if (len < 2)
 			goto invalid_param_len;
 
 		spg = 0;
-		pg_len = p[1];
-		p += 2;
-		len -= 2;
+		pg_len = p[1] + 2;
 	}
 
 	/*
-	 * Supported subpages: all subpages and ATA feature sub-page f2h of
-	 * the control page.
+	 * The only supported subpage is the ATA feature sub-page f2h of the
+	 * control page.
 	 */
 	if (spg) {
 		switch (spg) {
-		case ALL_SUB_MPAGES:
-			/* All subpages is not supported for the control page */
-			if (pg == CONTROL_MPAGE) {
-				fp = (p[0] & 0x40) ? 1 : 0;
-				fp += hdr_len + bd_len;
-				goto invalid_param;
-			}
-			break;
 		case ATA_FEATURE_SUB_MPAGE:
 			if (qc->dev->flags & ATA_DFLAG_CDL &&
 			    pg == CONTROL_MPAGE)
 				break;
 			fallthrough;
 		default:
-			fp = (p[0] & 0x40) ? 1 : 0;
-			fp += hdr_len + bd_len;
+			fp = hdr_len + bd_len + 1;
 			goto invalid_param;
 		}
 	}
 	if (pg_len > len)
 		goto invalid_param_len;
+
+	/*
+	 * A MODE SELECT command is translated into at most one ATA command, so
+	 * only one mode page per command is supported. Reject any data after
+	 * the mode page before calling the mode page handlers, which may
+	 * already update the device flags.
+	 */
+	if (len > pg_len) {
+		fp = p - buffer + pg_len;
+		goto invalid_param;
+	}
 
 	switch (pg) {
 	case CACHE_MPAGE:
@@ -4685,13 +4762,6 @@ static unsigned int ata_scsi_mode_select_xlat(struct ata_queued_cmd *qc)
 		fp = bd_len + hdr_len;
 		goto invalid_param;
 	}
-
-	/*
-	 * Only one page has changeable data, so we only support setting one
-	 * page at a time.
-	 */
-	if (len > pg_len)
-		goto invalid_param;
 
 	return 0;
 
@@ -5462,7 +5532,7 @@ bool ata_scsi_offline_dev(struct ata_device *dev)
  *	ata_scsi_remove_dev - remove attached SCSI device
  *	@dev: ATA device to remove attached SCSI device for
  *
- *	This function is called from ata_eh_scsi_hotplug() and
+ *	This function is called from ata_scsi_hotplug() and
  *	responsible for removing the SCSI device attached to @dev.
  *
  *	LOCKING:

@@ -604,7 +604,7 @@ static int lan78xx_read_reg(struct lan78xx_net *dev, u32 index, u32 *data)
 	if (test_bit(EVENT_DEV_DISCONNECT, &dev->flags))
 		return -ENODEV;
 
-	buf = kmalloc(sizeof(u32), GFP_KERNEL);
+	buf = kmalloc_obj(u32);
 	if (!buf)
 		return -ENOMEM;
 
@@ -634,7 +634,7 @@ static int lan78xx_write_reg(struct lan78xx_net *dev, u32 index, u32 data)
 	if (test_bit(EVENT_DEV_DISCONNECT, &dev->flags))
 		return -ENODEV;
 
-	buf = kmalloc(sizeof(u32), GFP_KERNEL);
+	buf = kmalloc_obj(u32);
 	if (!buf)
 		return -ENOMEM;
 
@@ -1767,6 +1767,12 @@ static void lan78xx_get_wol(struct net_device *netdev,
 	u32 buf;
 	struct lan78xx_priv *pdata = (struct lan78xx_priv *)(dev->data[0]);
 
+	if (!netdev->phydev) {
+		wol->supported = 0;
+		wol->wolopts = 0;
+		return;
+	}
+
 	if (usb_autopm_get_interface(dev->intf) < 0)
 		return;
 
@@ -1797,6 +1803,9 @@ static int lan78xx_set_wol(struct net_device *netdev,
 
 	if (wol->wolopts & ~WAKE_ALL)
 		return -EINVAL;
+
+	if (!netdev->phydev)
+		return -EOPNOTSUPP;
 
 	ret = usb_autopm_get_interface(dev->intf);
 	if (ret < 0)

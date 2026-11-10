@@ -250,7 +250,7 @@ static int __init imx_rngc_probe(struct platform_device *pdev)
 	u32 ver_id;
 	u8  rng_type;
 
-	rngc = devm_kzalloc(&pdev->dev, sizeof(*rngc), GFP_KERNEL);
+	rngc = devm_kzalloc_obj(&pdev->dev, *rngc);
 	if (!rngc)
 		return -ENOMEM;
 
@@ -354,12 +354,19 @@ static const struct of_device_id imx_rngc_dt_ids[] = {
 };
 MODULE_DEVICE_TABLE(of, imx_rngc_dt_ids);
 
+static const struct platform_device_id imx_rngc_devtype[] = {
+	{ .name = "imx-rngc" },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(platform, imx_rngc_devtype);
+
 static struct platform_driver imx_rngc_driver = {
 	.driver = {
 		.name = KBUILD_MODNAME,
 		.pm = pm_ptr(&imx_rngc_pm_ops),
 		.of_match_table = imx_rngc_dt_ids,
 	},
+	.id_table = imx_rngc_devtype,
 };
 
 module_platform_driver_probe(imx_rngc_driver, imx_rngc_probe);

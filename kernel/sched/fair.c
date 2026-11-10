@@ -22,7 +22,6 @@
  */
 #include <linux/energy_model.h>
 #include <linux/mmap_lock.h>
-#include <linux/hugetlb_inline.h>
 #include <linux/jiffies.h>
 #include <linux/math.h>
 #include <linux/mm_api.h>
@@ -4364,7 +4363,7 @@ retry_pids:
 
 	for (; vma; vma = vma_next(&vmi)) {
 		if (!vma_migratable(vma) || !vma_policy_mof(vma) ||
-			is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_MIXEDMAP)) {
+			vma_is_hugetlb(vma) || !vma_is_mm_managed(vma)) {
 			trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_UNSUITABLE);
 			continue;
 		}
@@ -6965,8 +6964,8 @@ static void dequeue_throttled_task(struct task_struct *p, int flags)
 	WARN_ON_ONCE(p->se.on_rq);
 	list_del_init(&p->throttle_node);
 
-	/* task blocked after throttled */
-	if (flags & DEQUEUE_SLEEP) {
+	/* Task blocked after throttling or is leaving the fair class: */
+	if (flags & (DEQUEUE_SLEEP | DEQUEUE_CLASS)) {
 		p->throttled = false;
 		return;
 	}
@@ -11030,7 +11029,14 @@ alb_break_llc(struct lb_env *env)
 			return true;
 
 		cur = rcu_dereference_all(env->src_rq->curr);
-		if (cur && cur->sched_class == &fair_sched_class)
+		/*
+		 * Active balance only detaches CFS tasks, so a non-fair
+		 * curr is never migrated. Ignore it and avoid using its
+		 * state util in the misfit and LLC checks.
+		 */
+		if (cur && cur->sched_class != &fair_sched_class)
+			cur = NULL;
+		if (cur)
 			util = task_util(cur);
 
 		if (task_misfits_asym_cpu(env, cur) ||

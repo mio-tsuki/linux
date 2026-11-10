@@ -749,12 +749,6 @@ int snd_pcm_runtime_buffer_set_silence(struct snd_pcm_runtime *runtime)
 }
 EXPORT_SYMBOL_GPL(snd_pcm_runtime_buffer_set_silence);
 
-#if IS_ENABLED(CONFIG_SND_PCM_OSS)
-#define is_oss_stream(substream)	((substream)->oss.oss)
-#else
-#define is_oss_stream(substream)	false
-#endif
-
 static void pcm_qos_req_clear(struct snd_pcm_substream *substream)
 {
 	if (cpu_latency_qos_request_active(&substream->latency_pm_qos_req))
@@ -776,14 +770,15 @@ static void pcm_qos_req_update(struct snd_pcm_substream *substream, int usecs)
 					    usecs);
 }
 
-static int hw_params_state_check(struct snd_pcm_substream *substream)
+static int hw_params_state_check(struct snd_pcm_substream *substream,
+				 bool check_mmap)
 {
 	guard(pcm_stream_lock_irq)(substream);
 	switch (substream->runtime->state) {
 	case SNDRV_PCM_STATE_OPEN:
 	case SNDRV_PCM_STATE_SETUP:
 	case SNDRV_PCM_STATE_PREPARED:
-		if (!is_oss_stream(substream) &&
+		if (check_mmap && !is_oss_stream(substream) &&
 		    atomic_read(&substream->mmap_count))
 			return -EBADFD;
 		return 0;
@@ -806,7 +801,7 @@ static int snd_pcm_hw_params(struct snd_pcm_substream *substream,
 	err = snd_pcm_buffer_access_lock(runtime);
 	if (err < 0)
 		return err;
-	err = hw_params_state_check(substream);
+	err = hw_params_state_check(substream, true);
 	if (err)
 		goto unlock;
 
@@ -944,7 +939,8 @@ static int snd_pcm_hw_refine_with_lock(struct snd_pcm_substream *substream,
 	err = snd_pcm_buffer_access_lock(runtime);
 	if (err < 0)
 		return err;
-	err = hw_params_state_check(substream);
+	/* Refinement queries constraints without changing the mapped buffer. */
+	err = hw_params_state_check(substream, false);
 	if (err)
 		goto unlock;
 
@@ -3831,39 +3827,27 @@ static __poll_t snd_pcm_poll(struct file *file, poll_table *wait)
 /*
  * mmap status record
  */
-static vm_fault_t snd_pcm_mmap_status_fault(struct vm_fault *vmf)
-{
-	struct snd_pcm_substream *substream = vmf->vma->vm_private_data;
-	struct snd_pcm_runtime *runtime;
-	
-	if (substream == NULL)
-		return VM_FAULT_SIGBUS;
-	runtime = substream->runtime;
-	vmf->page = virt_to_page(runtime->status);
-	get_page(vmf->page);
-	return 0;
-}
-
-static const struct vm_operations_struct snd_pcm_vm_ops_status =
-{
-	.fault =	snd_pcm_mmap_status_fault,
-};
-
 static int snd_pcm_mmap_status(struct snd_pcm_substream *substream, struct file *file,
-			       struct vm_area_struct *area)
+			       struct vm_area_struct *vma)
 {
-	long size;
-	if (!(area->vm_flags & VM_READ))
-		return -EINVAL;
-	size = area->vm_end - area->vm_start;
-	if (size != PAGE_ALIGN(sizeof(struct snd_pcm_mmap_status)))
-		return -EINVAL;
-	area->vm_ops = &snd_pcm_vm_ops_status;
-	area->vm_private_data = substream;
-	vm_flags_mod(area, VM_DONTEXPAND | VM_DONTDUMP,
-		     VM_WRITE | VM_MAYWRITE);
+	const unsigned long size = vma->vm_end - vma->vm_start;
+	struct snd_pcm_runtime *runtime;
+	struct page *page;
 
-	return 0;
+	BUILD_BUG_ON(sizeof(struct snd_pcm_mmap_status) > PAGE_SIZE);
+
+	if (!(vma->vm_flags & VM_READ))
+		return -EINVAL;
+	if (size != PAGE_SIZE)
+		return -EINVAL;
+
+	vm_flags_mod(vma, VM_DONTEXPAND | VM_DONTDUMP,
+		     VM_WRITE | VM_MAYWRITE);
+	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+
+	runtime = substream->runtime;
+	page = virt_to_page(runtime->status);
+	return vm_insert_page(vma, vma->vm_start, page);
 }
 
 /*

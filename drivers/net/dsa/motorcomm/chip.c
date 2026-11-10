@@ -679,8 +679,8 @@ yt921x_fdb_flush_port(struct yt921x_priv *priv, int port, bool flush_static)
 }
 
 static int
-yt921x_fdb_add_index_in12(struct yt921x_priv *priv, u16 index, u16 ctrl1,
-			  u16 ctrl2)
+yt921x_fdb_add_index_in12(struct yt921x_priv *priv, u16 index, u32 ctrl1,
+			  u32 ctrl2)
 {
 	u32 ctrl;
 	u32 val;
@@ -2011,7 +2011,7 @@ static int yt921x_dsa_port_setup(struct dsa_switch *ds, int port)
 	int res;
 
 	if (!pm && (BIT(port) & yt921x_info_ports_mask(info))) {
-		pm = devm_kzalloc(dev, sizeof(*pm), GFP_KERNEL);
+		pm = devm_kzalloc_obj(dev, *pm);
 		if (!pm)
 			return -ENOMEM;
 		pp->mib = pm;
@@ -2617,11 +2617,11 @@ static int yt921x_mdio_probe(struct mdio_device *mdiodev)
 	struct yt921x_priv *priv;
 	struct dsa_switch *ds;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
-	mdio = devm_kzalloc(dev, sizeof(*mdio), GFP_KERNEL);
+	mdio = devm_kzalloc_obj(dev, *mdio);
 	if (!mdio)
 		return -ENOMEM;
 

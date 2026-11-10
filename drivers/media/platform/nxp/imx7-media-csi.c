@@ -466,7 +466,7 @@ static int imx7_csi_alloc_dma_buf(struct imx7_csi *csi,
 
 	buf->len = PAGE_ALIGN(size);
 	buf->virt = dma_alloc_coherent(csi->dev, buf->len, &buf->dma_addr,
-				       GFP_DMA | GFP_KERNEL);
+				       GFP_KERNEL);
 	if (!buf->virt)
 		return -ENOMEM;
 
@@ -2208,7 +2208,7 @@ static int imx7_csi_probe(struct platform_device *pdev)
 	struct imx7_csi *csi;
 	int ret;
 
-	csi = devm_kzalloc(&pdev->dev, sizeof(*csi), GFP_KERNEL);
+	csi = devm_kzalloc_obj(&pdev->dev, *csi);
 	if (!csi)
 		return -ENOMEM;
 
